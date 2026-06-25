@@ -354,7 +354,7 @@ tbody tr:last-child td{border-bottom:none;}
       </div>
     </div>
     <nav class="nav" id="nav"></nav>
-    <div class="sidebar-footer">TRADE JOURNAL · <span id="footer-year"></span></div>
+    <div class="sidebar-footer">TRADE JOURNAL · <span id="footer-year"></span><br><a onclick="handleLogout()" style="color:var(--loss); cursor:pointer;">Logout</a></div>
   </aside>
   <div class="main">
     <div class="topbar"></div>
@@ -362,6 +362,64 @@ tbody tr:last-child td{border-bottom:none;}
   </div>
 </div>
 <div class="toast" id="toast"></div>
+
+<div id="auth-overlay" style="position:fixed; inset:0; background:#0D1016; z-index:999; display:flex; align-items:center; justify-content:center;">
+  <div style="width:320px; background:#151A22; border:1px solid #262D39; border-radius:10px; padding:28px;">
+    <div style="font-family:'Fraunces',serif; font-size:22px; font-weight:600; color:#ECE7DA; margin-bottom:4px;">Aurum Journal</div>
+    <div style="font-size:12px; color:#8993A4; margin-bottom:18px;">Login to access your trades</div>
+    <input id="auth-email" type="email" placeholder="Email" style="width:100%; padding:9px 10px; margin-bottom:8px; background:#1B212B; border:1px solid #262D39; border-radius:8px; color:#ECE7DA;">
+    <input id="auth-password" type="password" placeholder="Password" style="width:100%; padding:9px 10px; margin-bottom:12px; background:#1B212B; border:1px solid #262D39; border-radius:8px; color:#ECE7DA;">
+    <div id="auth-error" style="font-size:11.5px; color:#FF5D73; margin-bottom:10px; display:none;"></div>
+    <button onclick="handleLogin()" style="width:100%; padding:10px; margin-bottom:8px; background:linear-gradient(135deg,#F2D680,#D4AF37); color:#241F0A; border:none; border-radius:8px; font-weight:600; cursor:pointer;">Login</button>
+    <button onclick="handleSignup()" style="width:100%; padding:10px; background:#1B212B; color:#ECE7DA; border:1px solid #262D39; border-radius:8px; cursor:pointer;">Create Account</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* ---------- Supabase setup ---------- */
+const SUPABASE_URL = 'PASTE_YOUR_PROJECT_URL_HERE';
+const SUPABASE_ANON_KEY = 'PASTE_YOUR_ANON_KEY_HERE';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let currentUser = null;
+
+function showAuthError(msg){
+  const el = document.getElementById('auth-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+async function handleSignup(){
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if(!email || !password){ showAuthError('Enter email and password'); return; }
+  const { error } = await sb.auth.signUp({ email, password });
+  if(error){ showAuthError(error.message); return; }
+  showAuthError('Account created! Now click Login.');
+}
+async function handleLogin(){
+  const email = document.getElementById('auth-email').value.trim();
+  const password = document.getElementById('auth-password').value;
+  if(!email || !password){ showAuthError('Enter email and password'); return; }
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  if(error){ showAuthError(error.message); return; }
+  await startApp();
+}
+async function handleLogout(){
+  await sb.auth.signOut();
+  currentUser = null;
+  state.trades = [];
+  document.getElementById('auth-overlay').style.display = 'flex';
+}
+async function startApp(){
+  const { data } = await sb.auth.getUser();
+  if(!data || !data.user){ return; }
+  currentUser = data.user;
+  document.getElementById('auth-overlay').style.display = 'none';
+  await loadState();
+  renderNav();
+  renderPage();
+}
+</script>
 
 <script>
 /* ============================================================
@@ -388,7 +446,7 @@ const ICONS = {
   archive:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M10 13h4"/></svg>',
 };
 
-let state = { startingBalance: 100000, trades: [], nextId: 1 };
+let state = { startingBalance: 100000, trades: [] };
 let currentPage = 'dashboard';
 let calView = { year: new Date().getFullYear(), month: new Date().getMonth() };
 
@@ -396,16 +454,33 @@ const SESSIONS = ['Asia','London','NY'];
 const QUALITIES = ['A+','A','B','C'];
 const PIP = 0.1;
 
-/* ---------- storage ---------- */
+/* ---------- storage (Supabase) ---------- */
 async function loadState(){
-  try{
-    const r = await window.storage.get('aurum_journal_data');
-    if(r && r.value){ const parsed = JSON.parse(r.value); state = Object.assign(state, parsed); }
-  }catch(e){ /* no data yet */ }
+  if(!currentUser) return;
+  const { data, error } = await sb.from('trades').select('*').eq('user_id', currentUser.id);
+  if(error){ console.error('load failed', error); return; }
+  state.trades = (data || []).map(row => ({
+    id: row.id, created_at: row.created_at, date: row.date, side: row.side,
+    lot: row.lot, entry: row.entry, exit: row.exit, sl: row.sl, tp: row.tp,
+    session: row.session, quality: row.quality, notes: row.notes
+  }));
 }
-async function saveState(){
-  try{ await window.storage.set('aurum_journal_data', JSON.stringify(state)); }
-  catch(e){ console.error('save failed', e); }
+async function insertTradeRemote(t){
+  const { data, error } = await sb.from('trades').insert({
+    user_id: currentUser.id, date: t.date, side: t.side, lot: t.lot,
+    entry: t.entry, exit: t.exit, sl: t.sl, tp: t.tp,
+    session: t.session, quality: t.quality, notes: t.notes
+  }).select().single();
+  if(error){ console.error('insert failed', error); showToast('Save failed: '+error.message); return null; }
+  return data;
+}
+async function deleteTradeRemote(id){
+  const { error } = await sb.from('trades').delete().eq('id', id).eq('user_id', currentUser.id);
+  if(error){ console.error('delete failed', error); showToast('Delete failed: '+error.message); }
+}
+async function clearAllTradesRemote(){
+  const { error } = await sb.from('trades').delete().eq('user_id', currentUser.id);
+  if(error){ console.error('clear failed', error); showToast('Clear failed: '+error.message); }
 }
 function showToast(msg){
   const t = document.getElementById('toast');
@@ -448,8 +523,8 @@ function calcTrade(t){
   if(slPips && tpPips && slPips>0){ rr = r2(tpPips/slPips); }
   return Object.assign({}, t, {entry, exit, sl, tp, lot, pips, pnl, slPips, riskDollar, riskPercent, tpPips, rr, posSize, result});
 }
-function computedTrades(){ return state.trades.map(calcTrade).sort((a,b)=> (a.date<b.date?1:a.date>b.date?-1:b.id-a.id)); }
-function computedTradesAsc(){ return state.trades.map(calcTrade).sort((a,b)=> (a.date>b.date?1:a.date<b.date?-1:a.id-b.id)); }
+function computedTrades(){ return state.trades.map(calcTrade).sort((a,b)=> (a.date<b.date?1:a.date>b.date?-1:(b.created_at>a.created_at?1:-1))); }
+function computedTradesAsc(){ return state.trades.map(calcTrade).sort((a,b)=> (a.date>b.date?1:a.date<b.date?-1:(a.created_at>b.created_at?1:-1))); }
 
 /* ---------- date helpers ---------- */
 function pad(n){ return n<10?'0'+n:''+n; }
@@ -636,6 +711,7 @@ async function seedDemoData(){
   const year = calView.year, month = new Date().getMonth();
   const notesPool = ['Clean breakout, held to TP','Engulfing candle on London open','NY session reversal','Fib retracement entry','Asian range fade','Patience paid off','Cut early — fear','News spike, avoided','Textbook pullback entry','Overtraded, lesson logged'];
   const count = 16 + Math.floor(Math.random()*10);
+  const batch = [];
   for(let i=0;i<count;i++){
     const day = 1 + Math.floor(Math.random()*27);
     const date = new Date(year, month, day);
@@ -655,22 +731,23 @@ async function seedDemoData(){
     let exit;
     if(won){ const frac = 0.4+Math.random()*0.8; exit = r2(entry + dir*tpPips*PIP*frac); }
     else { const frac = 0.5+Math.random()*0.7; exit = r2(entry - dir*slPips*PIP*frac); }
-    state.trades.push({
-      id: state.nextId++, date: toISO(date), side, lot, entry, exit, sl, tp,
+    batch.push({
+      user_id: currentUser.id, date: toISO(date), side, lot, entry, exit, sl, tp,
       session: SESSIONS[Math.floor(Math.random()*3)],
       quality: QUALITIES[Math.floor(Math.random()*4)],
       notes: notesPool[Math.floor(Math.random()*notesPool.length)]
     });
   }
-  await saveState();
+  const { data, error } = await sb.from('trades').insert(batch).select();
+  if(error){ showToast('Seed failed: '+error.message); return; }
+  state.trades.push(...data);
   showToast('Demo trades seeded for ' + MONTH_NAMES[month] + ' ' + year);
   renderPage();
 }
 async function clearAllData(){
   if(!confirm('Clear all trade data? This cannot be undone.')) return;
+  await clearAllTradesRemote();
   state.trades = [];
-  state.nextId = 1;
-  await saveState();
   showToast('All trade data cleared');
   renderPage();
 }
@@ -779,7 +856,7 @@ function pageTrades(){
           <tbody>
             ${dayTrades.map(t=>`
               <tr>
-                <td>${t.id}</td>
+                <td>${(t.id+'').slice(0,6)}</td>
                 <td><span class="tag ${t.side==='BUY'?'tag-buy':'tag-sell'}">${t.side}</span></td>
                 <td>${fmtNum(t.lot,2)}</td>
                 <td>${t.entry!=null?t.entry.toFixed(2):'—'}</td>
@@ -796,7 +873,7 @@ function pageTrades(){
                 <td>${t.session||'—'}</td>
                 <td><span class="tag-q q-${(t.quality||'').replace('+','plus')}">${t.quality||'—'}</span></td>
                 <td style="white-space:normal; max-width:180px;">${t.notes||''}</td>
-                <td><button class="del-btn" onclick="deleteTrade(${t.id})" title="Delete">✕</button></td>
+                <td><button class="del-btn" onclick="deleteTrade('${t.id}')" title="Delete">✕</button></td>
               </tr>`).join('')}
           </tbody>
         </table>
@@ -837,7 +914,6 @@ function pageTrades(){
 async function addTradeFromForm(e){
   e.preventDefault();
   const t = {
-    id: state.nextId++,
     date: document.getElementById('f-date').value,
     side: document.getElementById('f-side').value,
     lot: parseFloat(document.getElementById('f-lot').value)||0,
@@ -849,15 +925,16 @@ async function addTradeFromForm(e){
     quality: document.getElementById('f-quality').value,
     notes: document.getElementById('f-notes').value,
   };
-  state.trades.push(t);
-  await saveState();
-  showToast('Trade #'+t.id+' added');
+  const saved = await insertTradeRemote(t);
+  if(!saved) return;
+  state.trades.push({ id: saved.id, created_at: saved.created_at, ...t });
+  showToast('Trade added');
   renderPage();
 }
 async function deleteTrade(id){
+  await deleteTradeRemote(id);
   state.trades = state.trades.filter(t=>t.id!==id);
-  await saveState();
-  showToast('Trade #'+id+' removed');
+  showToast('Trade removed');
   renderPage();
 }
 
@@ -1195,11 +1272,13 @@ function attachPageHandlers(){
 /* ---------- init ---------- */
 async function init(){
   document.getElementById('footer-year').textContent = new Date().getFullYear();
-  await loadState();
-  renderNav();
-  renderPage();
+  const { data } = await sb.auth.getSession();
+  if(data && data.session){
+    await startApp();
+  }
 }
 init();
 </script>
 </body>
 </html>
+
